@@ -17,7 +17,9 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -177,15 +179,15 @@ func (r *SecretProviderClassPodStatusReconciler) Patcher(ctx context.Context) er
 	for secret, owners := range secretOwnerMap {
 		patchFn := func() (bool, error) {
 			if err := r.patchSecretWithOwnerRef(ctx, secret.Name, secret.Namespace, owners...); err != nil {
-				if !apierrors.IsConflict(err) || !apierrors.IsTimeout(err) {
-					klog.ErrorS(err, "failed to set owner ref for secret", "secret", klog.ObjectRef{Namespace: secret.Namespace, Name: secret.Name})
+				if apierrors.IsConflict(err) || apierrors.IsTimeout(err) {
+					return false, nil
 				}
 				// syncSecret.enabled is set to false by default in the helm chart for installing the driver in v0.0.23+
 				// that would result in a forbidden error, so generate a warning that can be helpful for debugging
 				if apierrors.IsForbidden(err) {
 					klog.Warning(SyncSecretForbiddenWarning)
 				}
-				return false, nil
+				return false, err
 			}
 			return true, nil
 		}
@@ -296,7 +298,6 @@ func (r *SecretProviderClassPodStatusReconciler) Reconcile(ctx context.Context, 
 			continue
 		}
 
-		var funcs []func() (bool, error)
 		secretType := secretutil.GetSecretType(strings.TrimSpace(secretObj.Type))
 
 		var datamap map[string][]byte
@@ -320,9 +321,21 @@ func (r *SecretProviderClassPodStatusReconciler) Reconcile(ctx context.Context, 
 		// only on secrets created and managed by the driver
 		labelsMap[SecretManagedLabel] = "true"
 
-		createFn := func() (bool, error) {
+		if err := wait.ExponentialBackoff(wait.Backoff{
+			Steps:    5,
+			Duration: 1 * time.Millisecond,
+			Factor:   1.0,
+			Jitter:   0.1,
+		}, func() (done bool, err error) {
 			if err := r.createOrUpdateK8sSecret(ctx, secretName, req.Namespace, datamap, labelsMap, annotationsMap, secretType); err != nil {
 				klog.ErrorS(err, "failed to create Kubernetes secret", "spc", klog.KObj(spc), "pod", klog.KObj(pod), "secret", klog.ObjectRef{Namespace: req.Namespace, Name: secretName}, "spcps", klog.KObj(spcPodStatus))
+				// Returning the error here short-circuits the remaining
+				// ExponentialBackoff and triggers a full reconcile in 5
+				// seconds (vs 5 minutes for the next timed reconcile).
+				if apierrors.IsConflict(err) {
+					return false, err
+				}
+
 				// syncSecret.enabled is set to false by default in the helm chart for installing the driver in v0.0.23+
 				// that would result in a forbidden error, so generate a warning that can be helpful for debugging
 				if apierrors.IsForbidden(err) {
@@ -331,19 +344,9 @@ func (r *SecretProviderClassPodStatusReconciler) Reconcile(ctx context.Context, 
 				return false, nil
 			}
 			return true, nil
-		}
-		funcs = append(funcs, createFn)
-
-		for _, f := range funcs {
-			if err := wait.ExponentialBackoff(wait.Backoff{
-				Steps:    5,
-				Duration: 1 * time.Millisecond,
-				Factor:   1.0,
-				Jitter:   0.1,
-			}, f); err != nil {
-				r.generateEvent(pod, corev1.EventTypeWarning, secretCreationFailedReason, err.Error())
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, err
-			}
+		}); err != nil {
+			r.generateEvent(pod, corev1.EventTypeWarning, secretCreationFailedReason, err.Error())
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, err
 		}
 	}
 
@@ -399,31 +402,59 @@ func (r *SecretProviderClassPodStatusReconciler) processIfBelongsToNode(objMeta 
 // createOrUpdateK8sSecret creates K8s secret with data from mounted files
 // If a secret with the same name already exists in the namespace of the pod, it will update that existing secret.
 func (r *SecretProviderClassPodStatusReconciler) createOrUpdateK8sSecret(ctx context.Context, name, namespace string, datamap map[string][]byte, labelsmap map[string]string, annotationsmap map[string]string, secretType corev1.SecretType) error {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:   namespace,
-			Name:        name,
-			Labels:      labelsmap,
-			Annotations: annotationsmap,
-		},
-		Type: secretType,
-		Data: datamap,
+	secret := &corev1.Secret{}
+	getErr := r.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, secret)
+
+	// Secret does not exist, create it
+	if apierrors.IsNotFound(getErr) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:   namespace,
+				Name:        name,
+				Labels:      labelsmap,
+				Annotations: annotationsmap,
+			},
+			Type: secretType,
+			Data: datamap,
+		}
+
+		err := r.writer.Create(ctx, secret)
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+
+		if err == nil {
+			klog.InfoS("successfully created Kubernetes secret", "secret", klog.ObjectRef{Namespace: namespace, Name: name})
+		}
+
+		return err
 	}
 
-	err := r.writer.Create(ctx, secret)
-	if err == nil {
-		klog.InfoS("successfully created Kubernetes secret", "secret", klog.ObjectRef{Namespace: namespace, Name: name})
+	if getErr != nil {
+		return getErr
+	}
+
+	// Secret exists, update it
+	klog.V(5).InfoS("Kubernetes secret is already created", "secret", klog.ObjectRef{Namespace: namespace, Name: name})
+
+	newSecret := *secret
+	newSecret.Data = datamap
+	oldData, err := json.Marshal(secret)
+	if err != nil {
+		return fmt.Errorf("failed to marshal old secret, err: %w", err)
+	}
+	newData, err := json.Marshal(&newSecret)
+	if err != nil {
+		return fmt.Errorf("failed to marshal new secret, err: %w", err)
+	}
+	if bytes.Equal(oldData, newData) {
 		return nil
 	}
-	if !apierrors.IsAlreadyExists(err) {
+
+	if err := r.writer.Update(ctx, &newSecret); err != nil {
 		return err
 	}
 
-	klog.V(5).InfoS("Kubernetes secret is already created", "secret", klog.ObjectRef{Namespace: namespace, Name: name})
-	err = r.writer.Update(ctx, secret)
-	if err != nil {
-		return err
-	}
 	klog.V(5).InfoS("successfully updated Kubernetes secret", "secret", klog.ObjectRef{Namespace: namespace, Name: name})
 	return nil
 }

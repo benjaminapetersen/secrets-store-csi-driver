@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 var (
@@ -121,6 +122,13 @@ func newReconciler(client client.Client, scheme *runtime.Scheme, nodeID string) 
 	}
 }
 
+// expectOwnerRefs asserts the secret's owner references match want exactly, by
+// full-struct equality and independent of order. ConsistOf uses DeepEqual, so
+// pointer fields (Controller, BlockOwnerDeletion) are compared by their pointees.
+func expectOwnerRefs(g Gomega, secret *corev1.Secret, want ...metav1.OwnerReference) {
+	g.Expect(secret.OwnerReferences).To(ConsistOf(want))
+}
+
 func TestPatchSecretWithOwnerRef(t *testing.T) {
 	g := NewWithT(t)
 
@@ -170,7 +178,13 @@ func TestCreateOrUpdateK8sSecret(t *testing.T) {
 	initObjects := []client.Object{
 		newSecret("my-secret", "default", labels, annotations),
 	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(initObjects...).Build()
+
+	client := fake.
+		NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(initObjects...).
+		Build()
+
 	reconciler := newReconciler(client, scheme, "node1")
 
 	// secret already exists, just update it.
@@ -186,6 +200,132 @@ func TestCreateOrUpdateK8sSecret(t *testing.T) {
 	g.Expect(secret.Labels).To(Equal(labels))
 
 	g.Expect(secret.Name).To(Equal("my-secret2"))
+}
+
+func TestCreateOrUpdateHotloop(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme, err := setupScheme()
+	g.Expect(err).NotTo(HaveOccurred())
+
+	labels := map[string]string{"environment": "test"}
+	annotations := map[string]string{"kubed.appscode.com/sync": "app=test"}
+
+	// secret1 is intentionally NOT pre-seeded so the create path runs.
+	initObjects := []client.Object{
+		newSecretProviderClassPodStatus("pod1-default-spc1", "default", "node1"),
+		newSecretProviderClass("spc1", "default"),
+		newPod("pod1", "default", []metav1.OwnerReference{
+			{
+				APIVersion:         "apps/v1",
+				BlockOwnerDeletion: new(true),
+				Controller:         new(true),
+				Kind:               "ReplicaSet",
+				Name:               "pod-6886c65f8f",
+				UID:                "f39da13d-7246-4ef5-aed4-a6905f82cbcd",
+			},
+		}),
+	}
+
+	var createCount, updateCount, patchCount int
+	client := fake.
+		NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(initObjects...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, client client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				createCount++
+				return client.Create(ctx, obj, opts...)
+			},
+			Update: func(ctx context.Context, client client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updateCount++
+				return client.Update(ctx, obj, opts...)
+			},
+			Patch: func(ctx context.Context, client client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCount++
+				return client.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := newReconciler(client, scheme, "node1")
+
+	// The Patcher copies only APIVersion/Kind/UID/Name from the pod's owner
+	// references; Controller/BlockOwnerDeletion are intentionally left nil.
+	wantRef := metav1.OwnerReference{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "pod-6886c65f8f",
+		UID:        "f39da13d-7246-4ef5-aed4-a6905f82cbcd",
+	}
+
+	secretKey := types.NamespacedName{Name: "secret1", Namespace: "default"}
+	getSecret := func() *corev1.Secret {
+		s := &corev1.Secret{}
+		g.Expect(client.Get(context.TODO(), secretKey, s)).NotTo(HaveOccurred())
+		return s
+	}
+
+	// (1) createOrUpdate creates the secret.
+	err = reconciler.createOrUpdateK8sSecret(context.TODO(), "secret1", "default", map[string][]byte{"foo": []byte("bar")}, labels, annotations, corev1.SecretTypeOpaque)
+	g.Expect(err).NotTo(HaveOccurred())
+	// (2) create=1, update=0, patch=0.
+	g.Expect(createCount).To(Equal(1))
+	g.Expect(updateCount).To(Equal(0))
+	g.Expect(patchCount).To(Equal(0))
+
+	// (3) Patcher adds the owner refs.
+	err = reconciler.Patcher(context.TODO())
+	g.Expect(err).NotTo(HaveOccurred())
+	// (4) create=1, update=0, patch=1, owner refs correct.
+	g.Expect(createCount).To(Equal(1))
+	g.Expect(updateCount).To(Equal(0))
+	g.Expect(patchCount).To(Equal(1))
+	expectOwnerRefs(g, getSecret(), wantRef)
+
+	// Simulate another controller adding metadata and changing the type.
+	secret := getSecret()
+	secret.Labels["foreign.example.com/team"] = "x"
+	secret.Annotations["foreign.example.com/owned"] = "yes"
+	secret.Type = corev1.SecretTypeTLS
+	err = client.Update(context.TODO(), secret)
+	g.Expect(err).NotTo(HaveOccurred())
+	updateCount = 0
+
+	// Identical desired data does not trigger an update.
+	err = reconciler.createOrUpdateK8sSecret(context.TODO(), "secret1", "default", map[string][]byte{"foo": []byte("bar")}, labels, annotations, corev1.SecretTypeOpaque)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(updateCount).To(Equal(0))
+
+	// (5) createOrUpdate updates only the secret data.
+	err = reconciler.createOrUpdateK8sSecret(context.TODO(), "secret1", "default", map[string][]byte{"foo": []byte("baz")}, labels, annotations, corev1.SecretTypeOpaque)
+	g.Expect(err).NotTo(HaveOccurred())
+	// (6) create=1, update=1, patch=1, owner refs and foreign metadata preserved.
+	g.Expect(createCount).To(Equal(1))
+	g.Expect(updateCount).To(Equal(1))
+	g.Expect(patchCount).To(Equal(1))
+	secret = getSecret()
+	expectOwnerRefs(g, secret, wantRef)
+	g.Expect(secret.Labels).To(HaveKeyWithValue("foreign.example.com/team", "x"))
+	g.Expect(secret.Annotations).To(HaveKeyWithValue("foreign.example.com/owned", "yes"))
+	g.Expect(secret.Type).To(Equal(corev1.SecretTypeTLS))
+
+	// (7) Patcher runs again and does nothing.
+	err = reconciler.Patcher(context.TODO())
+	g.Expect(err).NotTo(HaveOccurred())
+	// (8) create=1, update=1, patch=1, owner refs unchanged.
+	g.Expect(createCount).To(Equal(1))
+	g.Expect(updateCount).To(Equal(1))
+	g.Expect(patchCount).To(Equal(1))
+
+	secret = getSecret()
+	expectOwnerRefs(g, secret, wantRef)
+	g.Expect(secret.Data).To(Equal(map[string][]byte{"foo": []byte("baz")}))
+	g.Expect(secret.Labels).To(HaveKeyWithValue("environment", "test"))
+	g.Expect(secret.Labels).To(HaveKeyWithValue("foreign.example.com/team", "x"))
+	g.Expect(secret.Annotations).To(HaveKeyWithValue("kubed.appscode.com/sync", "app=test"))
+	g.Expect(secret.Annotations).To(HaveKeyWithValue("foreign.example.com/owned", "yes"))
+	g.Expect(secret.Name).To(Equal("secret1"))
 }
 
 func TestGenerateEvent(t *testing.T) {
@@ -246,7 +386,6 @@ func TestPatcherForPodWithOwner(t *testing.T) {
 
 	scheme, err := setupScheme()
 	g.Expect(err).NotTo(HaveOccurred())
-	tr := true
 
 	initObjects := []client.Object{
 		newSecretProviderClassPodStatus("pod1-default-spc1", "default", "node1"),
@@ -254,8 +393,8 @@ func TestPatcherForPodWithOwner(t *testing.T) {
 		newPod("pod1", "default", []metav1.OwnerReference{
 			{
 				APIVersion:         "apps/v1",
-				BlockOwnerDeletion: &tr,
-				Controller:         &tr,
+				BlockOwnerDeletion: new(true),
+				Controller:         new(true),
 				Kind:               "ReplicaSet",
 				Name:               "pod-6886c65f8f",
 				UID:                "f39da13d-7246-4ef5-aed4-a6905f82cbcd",
@@ -274,9 +413,12 @@ func TestPatcherForPodWithOwner(t *testing.T) {
 	err = client.Get(context.TODO(), types.NamespacedName{Name: "secret1", Namespace: "default"}, secret)
 	g.Expect(err).NotTo(HaveOccurred())
 
-	g.Expect(len(secret.OwnerReferences)).To(Equal(1))
-	g.Expect(secret.OwnerReferences[0].APIVersion).To(Equal("apps/v1"))
-	g.Expect(secret.OwnerReferences[0].Kind).To(Equal("ReplicaSet"))
-	g.Expect(secret.OwnerReferences[0].Name).To(Equal("pod-6886c65f8f"))
-	g.Expect(secret.OwnerReferences[0].UID).To(Equal(types.UID("f39da13d-7246-4ef5-aed4-a6905f82cbcd")))
+	// Controller/BlockOwnerDeletion are intentionally dropped: the Patcher copies
+	// only APIVersion/Kind/UID/Name from the pod's owner references.
+	expectOwnerRefs(g, secret, metav1.OwnerReference{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "pod-6886c65f8f",
+		UID:        "f39da13d-7246-4ef5-aed4-a6905f82cbcd",
+	})
 }
