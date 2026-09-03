@@ -321,19 +321,19 @@ func TestDoesNotFightForeignFields(t *testing.T) {
 	// driver* is what our SecretObject declares; the foreign* keys are added by a
 	// different controller and must not be stomped.
 	driverLabels := map[string]string{
-		"environment": "Iwillreplace", 					// value will be merged
+		"environment":  "Iwillreplace", // value will be merged
 		"driverlabel2": "tossed",
 	}
 	foreignLabels := map[string]string{
-		"environment": "replaceme",						// value will be merged
+		"environment":              "replaceme", // value will be merged
 		"foreign.example.com/team": "x",
 	}
 	driverAnnotations := map[string]string{
-		"kubed.appscode.com/sync": "app=Iwillreplace", 	// value will be merged
+		"kubed.appscode.com/sync": "app=Iwillreplace", // value will be merged
 		"kubed.appscode.com/sink": "app=tossed",
 	}
 	foreignAnnotations := map[string]string{
-		"kubed.appscode.com/sync": "app=replaceme",		// value will be merged
+		"kubed.appscode.com/sync":   "app=replaceme", // value will be merged
 		"foreign.example.com/owned": "yes",
 	}
 
