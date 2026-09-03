@@ -437,13 +437,25 @@ func (r *SecretProviderClassPodStatusReconciler) createOrUpdateK8sSecret(ctx con
 	// Secret exists, update it
 	klog.V(5).InfoS("Kubernetes secret is already created", "secret", klog.ObjectRef{Namespace: namespace, Name: name})
 
-	newSecret := *secret
+	newSecret := secret.DeepCopy()
 	newSecret.Data = datamap
+	if newSecret.Labels == nil {
+		newSecret.Labels = make(map[string]string, len(labelsmap))
+	}
+	for key, value := range labelsmap {
+		newSecret.Labels[key] = value
+	}
+	if newSecret.Annotations == nil {
+		newSecret.Annotations = make(map[string]string, len(annotationsmap))
+	}
+	for key, value := range annotationsmap {
+		newSecret.Annotations[key] = value
+	}
 	oldData, err := json.Marshal(secret)
 	if err != nil {
 		return fmt.Errorf("failed to marshal old secret, err: %w", err)
 	}
-	newData, err := json.Marshal(&newSecret)
+	newData, err := json.Marshal(newSecret)
 	if err != nil {
 		return fmt.Errorf("failed to marshal new secret, err: %w", err)
 	}
@@ -451,7 +463,7 @@ func (r *SecretProviderClassPodStatusReconciler) createOrUpdateK8sSecret(ctx con
 		return nil
 	}
 
-	if err := r.writer.Update(ctx, &newSecret); err != nil {
+	if err := r.writer.Update(ctx, newSecret); err != nil {
 		return err
 	}
 

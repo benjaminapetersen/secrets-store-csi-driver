@@ -328,6 +328,117 @@ func TestCreateOrUpdateHotloop(t *testing.T) {
 	g.Expect(secret.Name).To(Equal("secret1"))
 }
 
+func TestDoesNotFightForeignFields(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme, err := setupScheme()
+	g.Expect(err).NotTo(HaveOccurred())
+
+	foreignLabels := map[string]string{
+		"key1": "replaceme",
+		"key2": "x",
+	}
+	driverLabels := map[string]string{
+		"key1": "Iwillreplace",
+		"key3": "tossed",
+	}
+	foreignAnnotations := map[string]string{
+		"key1": "replaceme",
+		"key2": "yes",
+	}
+	driverAnnotations := map[string]string{
+		"key1": "Iwillreplace",
+		"key3": "tossed",
+	}
+
+	foreignRef := metav1.OwnerReference{
+		APIVersion: "example.com/v1",
+		Kind:       "ExternalThing",
+		Name:       "external-owner",
+		UID:        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+	}
+	foreignSecret := newSecret("secret1", "default", foreignLabels, foreignAnnotations)
+	foreignSecret.OwnerReferences = []metav1.OwnerReference{foreignRef}
+
+	initObjects := []client.Object{
+		newSecretProviderClassPodStatus("pod1-default-spc1", "default", "node1"),
+		newSecretProviderClass("spc1", "default"),
+		newPod("pod1", "default", []metav1.OwnerReference{
+			{
+				APIVersion:         "apps/v1",
+				BlockOwnerDeletion: new(true),
+				Controller:         new(true),
+				Kind:               "ReplicaSet",
+				Name:               "pod-6886c65f8f",
+				UID:                "f39da13d-7246-4ef5-aed4-a6905f82cbcd",
+			},
+		}),
+		foreignSecret,
+	}
+
+	var updateCount, patchCount int
+	client := fake.
+		NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(initObjects...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, client client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updateCount++
+				return client.Update(ctx, obj, opts...)
+			},
+			Patch: func(ctx context.Context, client client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCount++
+				return client.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := newReconciler(client, scheme, "node1")
+
+	driverRef := metav1.OwnerReference{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "pod-6886c65f8f",
+		UID:        "f39da13d-7246-4ef5-aed4-a6905f82cbcd",
+	}
+
+	secretKey := types.NamespacedName{Name: "secret1", Namespace: "default"}
+	getSecret := func() *corev1.Secret {
+		secret := &corev1.Secret{}
+		g.Expect(client.Get(context.TODO(), secretKey, secret)).NotTo(HaveOccurred())
+		return secret
+	}
+
+	err = reconciler.createOrUpdateK8sSecret(context.TODO(), "secret1", "default", map[string][]byte{"foo": []byte("bar")}, driverLabels, driverAnnotations, corev1.SecretTypeOpaque)
+	g.Expect(err).NotTo(HaveOccurred())
+	err = reconciler.Patcher(context.TODO())
+	g.Expect(err).NotTo(HaveOccurred())
+	got := getSecret()
+	expectOwnerRefs(g, got, foreignRef, driverRef)
+	g.Expect(got.Labels).To(HaveKeyWithValue("key1", "Iwillreplace"))
+	g.Expect(got.Labels).To(HaveKeyWithValue("key2", "x"))
+	g.Expect(got.Labels).To(HaveKeyWithValue("key3", "tossed"))
+	g.Expect(got.Annotations).To(HaveKeyWithValue("key1", "Iwillreplace"))
+	g.Expect(got.Annotations).To(HaveKeyWithValue("key2", "yes"))
+	g.Expect(got.Annotations).To(HaveKeyWithValue("key3", "tossed"))
+
+	updateBefore, patchBefore := updateCount, patchCount
+	err = reconciler.createOrUpdateK8sSecret(context.TODO(), "secret1", "default", map[string][]byte{"foo": []byte("bar")}, driverLabels, driverAnnotations, corev1.SecretTypeOpaque)
+	g.Expect(err).NotTo(HaveOccurred())
+	err = reconciler.Patcher(context.TODO())
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(updateCount).To(Equal(updateBefore))
+	g.Expect(patchCount).To(Equal(patchBefore))
+	got = getSecret()
+	expectOwnerRefs(g, got, foreignRef, driverRef)
+	g.Expect(got.Labels).To(HaveKeyWithValue("key1", "Iwillreplace"))
+	g.Expect(got.Labels).To(HaveKeyWithValue("key2", "x"))
+	g.Expect(got.Labels).To(HaveKeyWithValue("key3", "tossed"))
+	g.Expect(got.Annotations).To(HaveKeyWithValue("key1", "Iwillreplace"))
+	g.Expect(got.Annotations).To(HaveKeyWithValue("key2", "yes"))
+	g.Expect(got.Annotations).To(HaveKeyWithValue("key3", "tossed"))
+}
+
 func TestGenerateEvent(t *testing.T) {
 	g := NewWithT(t)
 
