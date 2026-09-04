@@ -422,10 +422,6 @@ func (r *SecretProviderClassPodStatusReconciler) createOrUpdateK8sSecret(ctx con
 		}
 
 		err := r.writer.Create(ctx, secret)
-		if apierrors.IsAlreadyExists(err) {
-			return err
-		}
-
 		if err == nil {
 			klog.InfoS("successfully created Kubernetes secret", "secret", klog.ObjectRef{Namespace: namespace, Name: name})
 		}
