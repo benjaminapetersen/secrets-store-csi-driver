@@ -313,7 +313,7 @@ func TestCreateOrUpdateHotloop(t *testing.T) {
 // (reconcile + patch run) and overwrites the foreign labels and annotations.
 // TODO: we intend to change this in a future release as this behavior
 // is incorrect.
-func TestUpdateOverwritesForeignLabelsAndAnnotations(t *testing.T) {
+func TestUpdateDoesNotModifyLabelsOrAnnotations(t *testing.T) {
 	g := NewWithT(t)
 
 	scheme, err := setupScheme()
@@ -322,20 +322,20 @@ func TestUpdateOverwritesForeignLabelsAndAnnotations(t *testing.T) {
 	// driver* is what our SecretObject declares; the foreign* keys are added by a
 	// different controller and must not be stomped.
 	foreignLabels := map[string]string{
-		"key1": "replaceme", // value will be merged
-		"key2": "x",
+		"key1": "key1foreignlabel", // value will be merged
+		"key2": "key2foreignlabel",
 	}
 	driverLabels := map[string]string{
-		"key1": "Iwillreplace",
-		"key3": "tossed",
+		"key1": "key1driverlabel",
+		"key3": "key3driverlabel",
 	}
 	foreignAnnotations := map[string]string{
-		"key1": "replaceme",
-		"key2": "yes",
+		"key1": "key1foreignannotation",
+		"key2": "key2foreignannotation",
 	}
 	driverAnnotations := map[string]string{
-		"key1": "Iwillreplace",
-		"key3": "tossed",
+		"key1": "key1driverannotation",
+		"key3": "key3driverannotation",
 	}
 
 	foreignRef := metav1.OwnerReference{
@@ -403,12 +403,12 @@ func TestUpdateOverwritesForeignLabelsAndAnnotations(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	got := getSecret()
 	expectOwnerRefs(g, got, foreignRef, driverRef)
-	g.Expect(got.Labels).To(HaveKeyWithValue("key1", "Iwillreplace"))
-	g.Expect(got.Labels).ToNot(HaveKey("key2"))
-	g.Expect(got.Labels).To(HaveKeyWithValue("key3", "tossed"))
-	g.Expect(got.Annotations).To(HaveKeyWithValue("key1", "Iwillreplace"))
-	g.Expect(got.Annotations).ToNot(HaveKey("key2"))
-	g.Expect(got.Annotations).To(HaveKeyWithValue("key3", "tossed"))
+	g.Expect(got.Labels).To(HaveKeyWithValue("key1", "key1foreignlabel"))
+	g.Expect(got.Labels).To(HaveKeyWithValue("key2", "key2foreignlabel"))
+	g.Expect(got.Labels).ToNot(HaveKey("key3"))
+	g.Expect(got.Annotations).To(HaveKeyWithValue("key1", "key1foreignannotation"))
+	g.Expect(got.Annotations).To(HaveKeyWithValue("key2", "key2foreignannotation"))
+	g.Expect(got.Annotations).ToNot(HaveKey("key3"))
 
 	// A second, content-identical pass must be a complete no-op: the foreign
 	// fields do not provoke an update, and the patcher does not re-add anything.
@@ -421,12 +421,12 @@ func TestUpdateOverwritesForeignLabelsAndAnnotations(t *testing.T) {
 	g.Expect(patchCount).To(Equal(patchBefore))
 	got = getSecret()
 	expectOwnerRefs(g, got, foreignRef, driverRef)
-	g.Expect(got.Labels).To(HaveKeyWithValue("key1", "Iwillreplace"))
-	g.Expect(got.Labels).ToNot(HaveKey("key2"))
-	g.Expect(got.Labels).To(HaveKeyWithValue("key3", "tossed"))
-	g.Expect(got.Annotations).To(HaveKeyWithValue("key1", "Iwillreplace"))
-	g.Expect(got.Annotations).ToNot(HaveKey("key2"))
-	g.Expect(got.Annotations).To(HaveKeyWithValue("key3", "tossed"))
+	g.Expect(got.Labels).To(HaveKeyWithValue("key1", "key1foreignlabel"))
+	g.Expect(got.Labels).To(HaveKeyWithValue("key2", "key2foreignlabel"))
+	g.Expect(got.Labels).ToNot(HaveKey("key3"))
+	g.Expect(got.Annotations).To(HaveKeyWithValue("key1", "key1foreignannotation"))
+	g.Expect(got.Annotations).To(HaveKeyWithValue("key2", "key2foreignannotation"))
+	g.Expect(got.Annotations).ToNot(HaveKey("key3"))
 }
 
 func TestGenerateEvent(t *testing.T) {
