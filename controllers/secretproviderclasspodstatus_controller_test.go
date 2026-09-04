@@ -308,11 +308,12 @@ func TestCreateOrUpdateHotloop(t *testing.T) {
 	g.Expect(secret.Name).To(Equal("secret1"))
 }
 
-// TestDoesNotFightForeignFields proves that when another controller modifies
+// TestUpdateOverwritesForeignLabelsAndAnnotations proves that when another controller modifies
 // only labels/annotations and adds its own owner ref, our controller notices
-// (reconcile + patch run) but does not fight: the foreign fields survive, and a
-// repeated content-identical pass produces zero update/patch churn.
-func TestDoesNotFightForeignFields(t *testing.T) {
+// (reconcile + patch run) and overwrites the foreign labels and annotations.
+// TODO: we intend to change this in a future release as this behavior
+// is incorrect.
+func TestUpdateOverwritesForeignLabelsAndAnnotations(t *testing.T) {
 	g := NewWithT(t)
 
 	scheme, err := setupScheme()
@@ -403,10 +404,10 @@ func TestDoesNotFightForeignFields(t *testing.T) {
 	got := getSecret()
 	expectOwnerRefs(g, got, foreignRef, driverRef)
 	g.Expect(got.Labels).To(HaveKeyWithValue("key1", "Iwillreplace"))
-	g.Expect(got.Labels).To(HaveKeyWithValue("key2", "x"))
+	g.Expect(got.Labels).ToNot(HaveKey("key2"))
 	g.Expect(got.Labels).To(HaveKeyWithValue("key3", "tossed"))
 	g.Expect(got.Annotations).To(HaveKeyWithValue("key1", "Iwillreplace"))
-	g.Expect(got.Annotations).To(HaveKeyWithValue("key2", "yes"))
+	g.Expect(got.Annotations).ToNot(HaveKey("key2"))
 	g.Expect(got.Annotations).To(HaveKeyWithValue("key3", "tossed"))
 
 	// A second, content-identical pass must be a complete no-op: the foreign
@@ -421,10 +422,10 @@ func TestDoesNotFightForeignFields(t *testing.T) {
 	got = getSecret()
 	expectOwnerRefs(g, got, foreignRef, driverRef)
 	g.Expect(got.Labels).To(HaveKeyWithValue("key1", "Iwillreplace"))
-	g.Expect(got.Labels).To(HaveKeyWithValue("key2", "x"))
+	g.Expect(got.Labels).ToNot(HaveKey("key2"))
 	g.Expect(got.Labels).To(HaveKeyWithValue("key3", "tossed"))
 	g.Expect(got.Annotations).To(HaveKeyWithValue("key1", "Iwillreplace"))
-	g.Expect(got.Annotations).To(HaveKeyWithValue("key2", "yes"))
+	g.Expect(got.Annotations).ToNot(HaveKey("key2"))
 	g.Expect(got.Annotations).To(HaveKeyWithValue("key3", "tossed"))
 }
 

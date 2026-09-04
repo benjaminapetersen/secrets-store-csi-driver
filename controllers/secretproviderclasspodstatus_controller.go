@@ -19,7 +19,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -443,22 +442,8 @@ func (r *SecretProviderClassPodStatusReconciler) createOrUpdateK8sSecret(ctx con
 	unmodified := secret.DeepCopy()
 	secret.Data = datamap
 	secret.Type = secretType
-
-	if len(labelsmap) != 0 {
-		// Merge (not replace) labels and annotations so as to not compete with other controllers
-		if secret.Labels == nil {
-			secret.Labels = make(map[string]string, len(labelsmap))
-		}
-		maps.Copy(secret.Labels, labelsmap)
-	}
-
-	if len(annotationsmap) != 0 {
-		// Merge (not replace) annotations and annotations so as to not compete with other controllers
-		if secret.Annotations == nil {
-			secret.Annotations = make(map[string]string, len(annotationsmap))
-		}
-		maps.Copy(secret.Annotations, annotationsmap)
-	}
+	secret.Labels = labelsmap
+	secret.Annotations = annotationsmap
 
 	if equality.Semantic.DeepEqual(unmodified, secret) {
 		return nil
