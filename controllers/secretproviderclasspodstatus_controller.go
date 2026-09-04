@@ -419,7 +419,7 @@ func (r *SecretProviderClassPodStatusReconciler) createOrUpdateK8sSecret(ctx con
 
 		err := r.writer.Create(ctx, secret)
 		if apierrors.IsAlreadyExists(err) {
-			return nil
+			return err
 		}
 
 		if err == nil {
