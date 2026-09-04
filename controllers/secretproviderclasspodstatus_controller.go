@@ -18,7 +18,9 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -30,11 +32,11 @@ import (
 	"sigs.k8s.io/secrets-store-csi-driver/pkg/util/secretutil"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	clientcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -436,20 +438,32 @@ func (r *SecretProviderClassPodStatusReconciler) createOrUpdateK8sSecret(ctx con
 	// Secret exists, update it
 	klog.V(5).InfoS("Kubernetes secret is already created", "secret", klog.ObjectRef{Namespace: namespace, Name: name})
 
-	// The return from a controller-runtime `Get` operation does not guarantee
-	// ownership (for example, it could be a memory reference to a cache entry),
-	// so have to be copied before they can be modified.
-	unmodified := secret.DeepCopy()
-	secret.Data = datamap
-	secret.Type = secretType
-	secret.Labels = labelsmap
-	secret.Annotations = annotationsmap
-
-	if equality.Semantic.DeepEqual(unmodified, secret) {
+	if reflect.DeepEqual(secret.Data, datamap) {
 		return nil
 	}
 
-	if err := r.writer.Update(ctx, secret); err != nil {
+	// The return from a controller-runtime `Get` operation does not guarantee
+	// ownership (for example, it could be a memory reference to a cache entry),
+	// so have to be copied before they can be modified.
+	oldData, err := json.Marshal(secret)
+	if err != nil {
+		return fmt.Errorf("failed to marshal old secret, err: %w", err)
+	}
+
+	secret.Data = datamap
+
+	newData, err := json.Marshal(secret)
+	if err != nil {
+		return fmt.Errorf("failed to marshal new secret, err: %w", err)
+	}
+	// Patching data replaces values for existing data keys
+	// and appends new keys if it doesn't already exist
+	patch, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, secret)
+	if err != nil {
+		return fmt.Errorf("failed to create patch, err: %w", err)
+	}
+
+	if err = r.writer.Patch(ctx, secret, client.RawPatch(types.MergePatchType, patch)); err != nil {
 		return err
 	}
 

@@ -286,10 +286,10 @@ func TestCreateOrUpdateHotloop(t *testing.T) {
 	// (5) createOrUpdate updates the secret with new content.
 	err = reconciler.createOrUpdateK8sSecret(context.TODO(), "secret1", "default", map[string][]byte{"foo": []byte("baz")}, labels, annotations, corev1.SecretTypeOpaque)
 	g.Expect(err).NotTo(HaveOccurred())
-	// (6) create=1, update=1, patch=1, owner refs preserved (not obliterated).
+	// (6) create=1, update=0, patch=2, owner refs preserved (not obliterated).
 	g.Expect(createCount).To(Equal(1))
-	g.Expect(updateCount).To(Equal(1))
-	g.Expect(patchCount).To(Equal(1))
+	g.Expect(updateCount).To(Equal(0))
+	g.Expect(patchCount).To(Equal(2))
 	expectOwnerRefs(g, getSecret(), wantRef)
 
 	// (7) Patcher runs again and does nothing.
@@ -297,8 +297,8 @@ func TestCreateOrUpdateHotloop(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	// (8) create=1, update=1, patch=1, owner refs unchanged.
 	g.Expect(createCount).To(Equal(1))
-	g.Expect(updateCount).To(Equal(1))
-	g.Expect(patchCount).To(Equal(1))
+	g.Expect(updateCount).To(Equal(0))
+	g.Expect(patchCount).To(Equal(2))
 
 	secret := getSecret()
 	expectOwnerRefs(g, secret, wantRef)
