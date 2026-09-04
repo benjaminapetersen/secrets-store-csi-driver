@@ -422,10 +422,6 @@ func (r *SecretProviderClassPodStatusReconciler) createOrUpdateK8sSecret(ctx con
 		}
 
 		err := r.writer.Create(ctx, secret)
-		if apierrors.IsAlreadyExists(err) {
-			return err
-		}
-
 		if err == nil {
 			klog.InfoS("successfully created Kubernetes secret", "secret", klog.ObjectRef{Namespace: namespace, Name: name})
 		}
@@ -444,9 +440,6 @@ func (r *SecretProviderClassPodStatusReconciler) createOrUpdateK8sSecret(ctx con
 		return nil
 	}
 
-	// The return from a controller-runtime `Get` operation does not guarantee
-	// ownership (for example, it could be a memory reference to a cache entry),
-	// so have to be copied before they can be modified.
 	oldData, err := json.Marshal(secret)
 	if err != nil {
 		return fmt.Errorf("failed to marshal old secret, err: %w", err)
