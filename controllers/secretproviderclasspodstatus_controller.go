@@ -331,11 +331,7 @@ func (r *SecretProviderClassPodStatusReconciler) Reconcile(ctx context.Context, 
 			if err := r.createOrUpdateK8sSecret(ctx, secretName, req.Namespace, datamap, labelsMap, annotationsMap, secretType); err != nil {
 				klog.ErrorS(err, "failed to create Kubernetes secret", "spc", klog.KObj(spc), "pod", klog.KObj(pod), "secret", klog.ObjectRef{Namespace: req.Namespace, Name: secretName}, "spcps", klog.KObj(spcPodStatus))
 				// error out here to break out of the backoff and retry the full Reconcile() early
-				if apierrors.IsConflict(err) {
-					return false, err
-				}
-
-				if apierrors.IsAlreadyExists(err) {
+				if apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) {
 					return false, err
 				}
 
